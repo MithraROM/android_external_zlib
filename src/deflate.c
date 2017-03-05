@@ -178,15 +178,15 @@ struct static_tree_desc_s {int dummy;}; /* for buggy compilers */
  *    (except for the last MIN_MATCH-1 bytes of the input file).
  */
 #ifdef FASTEST
-#define INSERT_STRING(s, str, match_head) \
-   (UPDATE_HASH(s, s->ins_h, s->window[(str) + (MIN_MATCH-1)]), \
-    match_head = s->head[s->ins_h], \
-    s->head[s->ins_h] = (Pos)(str))
+#define INSERT_STRING(s, h, str, match_head) \
+   (UPDATE_HASH(s, h, s->window[(str) + (MIN_MATCH-1)]), \
+    match_head = s->head[h], \
+    s->head[h] = (Pos)(str))
 #else
-#define INSERT_STRING(s, str, match_head) \
-   (UPDATE_HASH(s, s->ins_h, s->window[(str) + (MIN_MATCH-1)]), \
-    match_head = s->prev[(str) & s->w_mask] = s->head[s->ins_h], \
-    s->head[s->ins_h] = (Pos)(str))
+#define INSERT_STRING(s, h, str, match_head) \
+   (UPDATE_HASH(s, h, s->window[(str) + (MIN_MATCH-1)]), \
+    match_head = s->prev[(str) & s->w_mask] = s->head[h], \
+    s->head[h] = (Pos)(str))
 #endif
 
 /* ===========================================================================
@@ -255,7 +255,7 @@ int ZEXPORT deflateInit2_(strm, level, method, windowBits, memLevel, strategy,
 #ifdef FASTEST
     if (level != 0) level = 1;
 #else
-    if (level == Z_DEFAULT_COMPRESSION) level = 6;
+    if (level == Z_DEFAULT_COMPRESSION) level = 3;
 #endif
 
     if (windowBits < 0) { /* suppress zlib wrapper */
@@ -502,7 +502,7 @@ int ZEXPORT deflateParams(strm, level, strategy)
 #ifdef FASTEST
     if (level != 0) level = 1;
 #else
-    if (level == Z_DEFAULT_COMPRESSION) level = 6;
+    if (level == Z_DEFAULT_COMPRESSION) level = 3;
 #endif
     if (level < 0 || level > 9 || strategy < 0 || strategy > Z_FIXED) {
         return Z_STREAM_ERROR;
@@ -884,9 +884,16 @@ int ZEXPORT deflate (strm, flush)
      * flushes. For repeated and useless calls with Z_FINISH, we keep
      * returning Z_STREAM_END instead of Z_BUF_ERROR.
      */
-    } else if (strm->avail_in == 0 && RANK(flush) <= RANK(old_flush) &&
-               flush != Z_FINISH) {
-        ERR_RETURN(strm, Z_BUF_ERROR);
+    } else if (strm->avail_in == 0 && flush != Z_FINISH) {
+        char err;
+
+        /* Degrade Z_BLOCK only when last flush was Z_BLOCK */
+        err = (old_flush == Z_BLOCK) ?
+              RANK(flush) <= RANK(old_flush) : flush <= old_flush;
+
+        if (err) {
+            ERR_RETURN(strm, Z_BUF_ERROR);
+        }
     }
 
     /* User must not provide more input after the first FINISH: */
@@ -1651,7 +1658,7 @@ local block_state deflate_fast(s, flush)
          */
         hash_head = NIL;
         if (s->lookahead >= MIN_MATCH) {
-            INSERT_STRING(s, s->strstart, hash_head);
+            INSERT_STRING(s, s->ins_h, s->strstart, hash_head);
         }
 
         /* Find the longest match, discarding those <= prev_length.
@@ -1679,14 +1686,16 @@ local block_state deflate_fast(s, flush)
 #ifndef FASTEST
             if (s->match_length <= s->max_insert_length &&
                 s->lookahead >= MIN_MATCH) {
+                uInt t_ins_h = s->ins_h;
                 s->match_length--; /* string at strstart already in table */
                 do {
                     s->strstart++;
-                    INSERT_STRING(s, s->strstart, hash_head);
+                    INSERT_STRING(s, t_ins_h, s->strstart, hash_head);
                     /* strstart never exceeds WSIZE-MAX_MATCH, so there are
                      * always MIN_MATCH bytes ahead.
                      */
                 } while (--s->match_length != 0);
+                s->ins_h = t_ins_h;
                 s->strstart++;
             } else
 #endif
@@ -1754,7 +1763,7 @@ local block_state deflate_slow(s, flush)
          */
         hash_head = NIL;
         if (s->lookahead >= MIN_MATCH) {
-            INSERT_STRING(s, s->strstart, hash_head);
+            INSERT_STRING(s, s->ins_h, s->strstart, hash_head);
         }
 
         /* Find the longest match, discarding those <= prev_length.
@@ -1789,6 +1798,7 @@ local block_state deflate_slow(s, flush)
          */
         if (s->prev_length >= MIN_MATCH && s->match_length <= s->prev_length) {
             uInt max_insert = s->strstart + s->lookahead - MIN_MATCH;
+            uInt t_ins_h;
             /* Do not insert strings in hash table beyond this. */
 
             check_match(s, s->strstart-1, s->prev_match, s->prev_length);
@@ -1803,11 +1813,13 @@ local block_state deflate_slow(s, flush)
              */
             s->lookahead -= s->prev_length-1;
             s->prev_length -= 2;
+            t_ins_h = s->ins_h;
             do {
                 if (++s->strstart <= max_insert) {
-                    INSERT_STRING(s, s->strstart, hash_head);
+                    INSERT_STRING(s, t_ins_h, s->strstart, hash_head);
                 }
             } while (--s->prev_length != 0);
+            s->ins_h = t_ins_h;
             s->match_available = 0;
             s->match_length = MIN_MATCH-1;
             s->strstart++;
